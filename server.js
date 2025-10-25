@@ -1,0 +1,315 @@
+const express = require('express');
+const app = express();
+const http = require('http').createServer(app);
+const io = require('socket.io')(http, {
+    cors: {
+        origin: "*", // Allow all origins (you can restrict this later)
+        methods: ["GET", "POST"],
+        credentials: true
+    }
+});
+
+const PORT = process.env.PORT || 3000;
+
+// Store active rooms
+const rooms = new Map();
+
+// Bachelor clichés library (same as frontend)
+const CLICHES = [
+    "Here for the right reasons",
+    "Can I steal you?",
+    "Most dramatic season",
+    "Journey",
+    "Process",
+    "Helicopter date",
+    "Hot tub scene",
+    "Someone cries",
+    "Champagne toast",
+    "Rose ceremony drama",
+    "Awkward silence",
+    "Group date drama",
+    "I'm falling for you",
+    "Fantasy suite card",
+    "Hometown visit",
+    "Meeting the parents",
+    "Interrupted conversation",
+    "Close-up of a rose",
+    "Dramatic music swell",
+    "Sunset walk on beach",
+    "Will you accept this rose?",
+    "Final rose tonight",
+    "Connection",
+    "Vulnerable moment",
+    "Open up emotionally",
+    "Trust the process",
+    "Love triangle",
+    "Cocktail party drama",
+    "Tears during ITM",
+    "Not here to make friends",
+    "Leap of faith",
+    "Take a chance on love",
+    "Follow my heart",
+    "Wife material",
+    "Meet my family"
+];
+
+// Generate a random 4-letter room code
+function generateRoomCode() {
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+    let code = '';
+    for (let i = 0; i < 4; i++) {
+        code += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    // Make sure code doesn't already exist
+    return rooms.has(code) ? generateRoomCode() : code;
+}
+
+// Generate a unique bingo card (24 random clichés + FREE SPACE in middle)
+function generateBingoCard() {
+    // Shuffle the clichés
+    const shuffled = [...CLICHES].sort(() => Math.random() - 0.5);
+    
+    // Take first 24
+    const card = shuffled.slice(0, 24);
+    
+    // Insert FREE SPACE at position 12 (middle)
+    card.splice(12, 0, "FREE SPACE");
+    
+    return card;
+}
+
+// Check if a player has won (5 in a row: horizontal, vertical, or diagonal)
+function checkWin(markedSquares) {
+    const size = 5;
+    
+    // Check rows
+    for (let i = 0; i < size; i++) {
+        let row = [];
+        for (let j = 0; j < size; j++) {
+            row.push(markedSquares[i * size + j]);
+        }
+        if (row.every(m => m)) return true;
+    }
+    
+    // Check columns
+    for (let i = 0; i < size; i++) {
+        let col = [];
+        for (let j = 0; j < size; j++) {
+            col.push(markedSquares[i + j * size]);
+        }
+        if (col.every(m => m)) return true;
+    }
+    
+    // Check diagonals
+    let diag1 = [markedSquares[0], markedSquares[6], markedSquares[12], markedSquares[18], markedSquares[24]];
+    if (diag1.every(m => m)) return true;
+    
+    let diag2 = [markedSquares[4], markedSquares[8], markedSquares[12], markedSquares[16], markedSquares[20]];
+    if (diag2.every(m => m)) return true;
+    
+    return false;
+}
+
+// Socket.io connection handling
+io.on('connection', (socket) => {
+    console.log('New client connected:', socket.id);
+
+    // Create a new room
+    socket.on('create-room', (data) => {
+        const roomCode = generateRoomCode();
+        const player = {
+            id: socket.id,
+            username: data.username,
+            isHost: true,
+            bingoCard: [], // Will be assigned when game starts
+            markedSquares: new Array(25).fill(false),
+            markedSquares: new Array(25).fill(false)
+        };
+        
+        // Mark FREE SPACE (index 12) as already marked
+        player.markedSquares[12] = true;
+        
+        rooms.set(roomCode, {
+            code: roomCode,
+            host: socket.id,
+            players: [player],
+            gameStarted: false
+        });
+        
+        socket.join(roomCode);
+        
+        console.log(`Room ${roomCode} created by ${data.username}`);
+        
+        socket.emit('room-created', {
+            roomCode: roomCode,
+            players: rooms.get(roomCode).players
+        });
+    });
+
+    // Join an existing room
+    socket.on('join-room', (data) => {
+        const roomCode = data.roomCode.toUpperCase();
+        const room = rooms.get(roomCode);
+        
+        if (!room) {
+            socket.emit('error', { message: 'Room not found' });
+            return;
+        }
+        
+        if (room.gameStarted) {
+            socket.emit('error', { message: 'Game already in progress' });
+            return;
+        }
+        
+        const player = {
+            id: socket.id,
+            username: data.username,
+            isHost: false,
+            bingoCard: [], // Will be assigned when game starts
+            markedSquares: new Array(25).fill(false)
+        };
+        
+        // Mark FREE SPACE (index 12) as already marked
+        player.markedSquares[12] = true;
+        
+        room.players.push(player);
+        socket.join(roomCode);
+        
+        console.log(`${data.username} joined room ${roomCode}`);
+        
+        // Tell the joiner they successfully joined
+        socket.emit('room-joined', {
+            roomCode: roomCode,
+            players: room.players
+        });
+        
+        // Tell everyone else in the room that a new player joined
+        socket.to(roomCode).emit('player-joined', {
+            player: player,
+            players: room.players
+        });
+    });
+
+    // Host starts the game
+    socket.on('start-game', (data) => {
+        const roomCode = data.roomCode;
+        const room = rooms.get(roomCode);
+        
+        if (!room) {
+            socket.emit('error', { message: 'Room not found' });
+            return;
+        }
+        
+        if (room.host !== socket.id) {
+            socket.emit('error', { message: 'Only host can start the game' });
+            return;
+        }
+        
+        // Generate unique bingo card for each player
+        room.players.forEach(player => {
+            player.bingoCard = generateBingoCard();
+        });
+        
+        room.gameStarted = true;
+        
+        console.log(`Game started in room ${roomCode}`);
+        
+        // Send each player their unique card
+        room.players.forEach(player => {
+            io.to(player.id).emit('game-started', {
+                bingoCard: player.bingoCard,
+                players: room.players.map(p => ({
+                    id: p.id,
+                    username: p.username,
+                    isHost: p.isHost
+                }))
+            });
+        });
+    });
+
+    // Player marks a square
+    socket.on('mark-square', (data) => {
+        const { roomCode, index } = data;
+        const room = rooms.get(roomCode);
+        
+        if (!room) {
+            socket.emit('error', { message: 'Room not found' });
+            return;
+        }
+        
+        // Find the player
+        const player = room.players.find(p => p.id === socket.id);
+        if (!player) {
+            socket.emit('error', { message: 'Player not in room' });
+            return;
+        }
+        
+        // Toggle the square
+        player.markedSquares[index] = !player.markedSquares[index];
+        
+        console.log(`${player.username} marked square ${index} in room ${roomCode}`);
+        
+        // Broadcast to all players in the room (including sender)
+        io.to(roomCode).emit('square-marked', {
+            playerId: socket.id,
+            username: player.username,
+            index: index,
+            marked: player.markedSquares[index]
+        });
+        
+        // Check if this player won
+        if (checkWin(player.markedSquares)) {
+            console.log(`${player.username} won in room ${roomCode}!`);
+            
+            // Announce winner to everyone in the room
+            io.to(roomCode).emit('player-won', {
+                playerId: socket.id,
+                username: player.username
+            });
+        }
+    });
+
+    // Player leaves/disconnects
+    socket.on('disconnect', () => {
+        console.log('Client disconnected:', socket.id);
+        
+        // Find which room they were in
+        rooms.forEach((room, roomCode) => {
+            const playerIndex = room.players.findIndex(p => p.id === socket.id);
+            
+            if (playerIndex !== -1) {
+                const player = room.players[playerIndex];
+                room.players.splice(playerIndex, 1);
+                
+                console.log(`${player.username} left room ${roomCode}`);
+                
+                // If room is empty, delete it
+                if (room.players.length === 0) {
+                    rooms.delete(roomCode);
+                    console.log(`Room ${roomCode} deleted (empty)`);
+                } else {
+                    // If the host left, assign new host
+                    if (player.isHost) {
+                        room.players[0].isHost = true;
+                        room.host = room.players[0].id;
+                        
+                        // Notify everyone of new host
+                        io.to(roomCode).emit('new-host', {
+                            players: room.players
+                        });
+                    } else {
+                        // Just notify that a player left
+                        io.to(roomCode).emit('player-left', {
+                            players: room.players
+                        });
+                    }
+                }
+            }
+        });
+    });
+});
+
+// Start server
+http.listen(PORT, () => {
+    console.log(`🌹 Bachelor Bingo server running on port ${PORT}`);
+});
