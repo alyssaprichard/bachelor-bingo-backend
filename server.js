@@ -89,7 +89,7 @@ const CLICHES = [
     "Jesse asks Mel if he regrets his final choice",
     "A surprise guest appears",
     "Everyone hugs at the end like nothing happened"
-];
+        ];
 
 // Generate a random 4-letter room code
 function generateRoomCode() {
@@ -160,7 +160,6 @@ io.on('connection', (socket) => {
             username: data.username,
             isHost: true,
             bingoCard: [], // Will be assigned when game starts
-            markedSquares: new Array(25).fill(false),
             markedSquares: new Array(25).fill(false)
         };
         
@@ -171,7 +170,8 @@ io.on('connection', (socket) => {
             code: roomCode,
             host: socket.id,
             players: [player],
-            gameStarted: false
+            gameStarted: false,
+            gameMode: 'regular' // 'regular' or 'blackout'
         });
         
         socket.join(roomCode);
@@ -296,15 +296,119 @@ io.on('connection', (socket) => {
         });
         
         // Check if this player won
-        if (checkWin(player.markedSquares)) {
-            console.log(`${player.username} won in room ${roomCode}!`);
+        const hasWon = room.gameMode === 'blackout' 
+            ? player.markedSquares.every(m => m) // Blackout: all 25 squares
+            : checkWin(player.markedSquares); // Regular: 5 in a row
+            
+        if (hasWon) {
+            const markedCount = player.markedSquares.filter(m => m).length;
+            console.log(`${player.username} won in room ${roomCode}! (${room.gameMode} mode, ${markedCount} squares)`);
             
             // Announce winner to everyone in the room
             io.to(roomCode).emit('player-won', {
                 playerId: socket.id,
-                username: player.username
+                username: player.username,
+                gameMode: room.gameMode,
+                markedCount: markedCount
             });
         }
+    });
+
+    // Host starts a new round (clear boards, new cards, regular mode)
+    socket.on('new-round', (data) => {
+        const roomCode = data.roomCode;
+        const room = rooms.get(roomCode);
+        
+        if (!room) {
+            socket.emit('error', { message: 'Room not found' });
+            return;
+        }
+        
+        if (room.host !== socket.id) {
+            socket.emit('error', { message: 'Only host can start new round' });
+            return;
+        }
+        
+        // Generate new unique cards for each player
+        room.players.forEach(player => {
+            player.bingoCard = generateBingoCard();
+            player.markedSquares = new Array(25).fill(false);
+            player.markedSquares[12] = true; // Mark FREE SPACE
+        });
+        
+        room.gameMode = 'regular';
+        
+        console.log(`New round started in room ${roomCode}`);
+        
+        // Send each player their new unique card
+        room.players.forEach(player => {
+            io.to(player.id).emit('new-round-started', {
+                bingoCard: player.bingoCard,
+                gameMode: 'regular'
+            });
+        });
+    });
+
+    // Host continues to blackout mode (keep marked squares, try to fill all 25)
+    socket.on('continue-to-blackout', (data) => {
+        const roomCode = data.roomCode;
+        const room = rooms.get(roomCode);
+        
+        if (!room) {
+            socket.emit('error', { message: 'Room not found' });
+            return;
+        }
+        
+        if (room.host !== socket.id) {
+            socket.emit('error', { message: 'Only host can continue to blackout' });
+            return;
+        }
+        
+        room.gameMode = 'blackout';
+        
+        console.log(`Blackout mode started in room ${roomCode}`);
+        
+        // Tell everyone we're now in blackout mode
+        io.to(roomCode).emit('blackout-mode-started', {
+            gameMode: 'blackout'
+        });
+    });
+
+    // Host finishes the blackout game (find winner with most squares)
+    socket.on('finish-game', (data) => {
+        const roomCode = data.roomCode;
+        const room = rooms.get(roomCode);
+        
+        if (!room) {
+            socket.emit('error', { message: 'Room not found' });
+            return;
+        }
+        
+        if (room.host !== socket.id) {
+            socket.emit('error', { message: 'Only host can finish game' });
+            return;
+        }
+        
+        // Find player with most marked squares
+        let winner = room.players[0];
+        let maxMarked = winner.markedSquares.filter(m => m).length;
+        
+        room.players.forEach(player => {
+            const markedCount = player.markedSquares.filter(m => m).length;
+            if (markedCount > maxMarked) {
+                maxMarked = markedCount;
+                winner = player;
+            }
+        });
+        
+        console.log(`Game finished in room ${roomCode}. Winner: ${winner.username} with ${maxMarked} squares`);
+        
+        // Announce winner to everyone
+        io.to(roomCode).emit('game-finished', {
+            playerId: winner.id,
+            username: winner.username,
+            markedCount: maxMarked
+        });
     });
 
     // Player leaves/disconnects
